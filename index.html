@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Behind the Matchmaking Curtain</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#fff;--fg:#1a1a2e;--card:#f6f7fb;--line:#dcdfe6;--accent:#4f46e5;color-scheme:light dark;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0f1117;--fg:#e8e8ef;--card:#191c26;--line:#2b2f3b;--accent:#8b85ff;}}
+:root[data-theme="dark"]{--bg:#0f1117;--fg:#e8e8ef;--card:#191c26;--line:#2b2f3b;--accent:#8b85ff;}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;margin:0;padding:16px;max-width:980px;margin-inline:auto}
+h1{font-size:1.4rem}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin:18px 0}
+h2{margin-top:0;font-size:1.05rem}
+.ctrl{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:.9rem}
+input[type=range]{width:160px}
+button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.85rem}
+.note{font-size:.8rem;opacity:.75}
+.readout{font-weight:600}
+.src{font-size:.78rem;opacity:.7;margin-top:6px}
+</style>
+</head>
+<body>
+<h1>Behind the Matchmaking Curtain: How Skill Ratings Decide Who You Play Against</h1>
+<p class="note">A documented Monte Carlo simulation of the Elo rating model, seeded to match facts Lichess
+publishes about its own rating pool (ratings start at 1500; median stays near 1500 — <a href="https://lichess.org/page/rating-systems" target="_blank">lichess.org/page/rating-systems</a>).
+Population spread (SD≈300) is a disclosed modeling assumption, not an official Lichess figure. Seed is fixed so results are reproducible.</p>
+
+<section><h2>View 1 — Where ratings actually sit</h2>
+<div id="v1"></div>
+<div class="ctrl">Your rating: <input id="v1r" type="range" min="400" max="2600" value="1500"><span id="v1out" class="readout"></span></div>
+</section>
+
+<section><h2>View 2 — The expected-score equation</h2>
+<div id="v2"></div>
+<div class="ctrl">Your rating <input id="v2a" type="range" min="400" max="2600" value="1500">
+Opponent rating <input id="v2b" type="range" min="400" max="2600" value="1600">
+<span id="v2out" class="readout"></span></div>
+</section>
+
+<section><h2>View 3 — A single game, step by step</h2>
+<div id="v3"></div>
+<div class="ctrl"><button id="v3next">Next real-simulated game</button><button id="v3reset">Reset</button>
+K-factor <input id="v3k" type="range" min="5" max="40" value="20"><span id="v3kout"></span>
+<span id="v3out" class="readout"></span></div>
+</section>
+
+<section><h2>View 4 — Waiting for a match</h2>
+<div id="v4"></div>
+<div class="ctrl">Your rating <input id="v4r" type="range" min="400" max="2600" value="1500">
+<button id="v4play">Play ▶</button><button id="v4reset">Reset</button>
+<span id="v4out" class="readout"></span></div>
+</section>
+
+<section><h2>View 5 — One player's season</h2>
+<div id="v5"></div>
+<div class="ctrl">Player <select id="v5sel"></select></div>
+</section>
+
+<section><h2>View 6 — Does the model's math hold up?</h2>
+<div id="v6"></div>
+<div class="ctrl">Filter <select id="v6sel"><option value="all">All players</option><option value="lo">Rating &lt; 1500</option><option value="hi">Rating ≥ 1500</option></select></div>
+</section>
+
+<section><h2>Verification &amp; assumptions</h2>
+<p class="note">Equation: E_A = 1 / (1 + 10^((R_B−R_A)/400)); update: R_A' = R_A + K(S_A − E_A).
+Numerical check: R_A=1500, R_B=1600 → E_A = 1/(1+10^(100/400)) = 0.360 (confirm against View 2's slider at those values).
+Boundary case: R_A = R_B → E_A = 0.5 exactly (set both View 2 sliders equal to confirm).
+K-tiers: 40 for players under 30 games (provisional), 20 standard, 10 for rating ≥ 2000 — matching common real-rating-system practice.
+Limitation: this models the classical Elo formula; Lichess's live system is Glicko-2, which also tracks rating uncertainty, not simulated here.</p>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/plotly.js@2.32.0/dist/plotly.min.js"></script>
+<script>
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rng=mulberry32(42);
+function randn(){let u=0,v=0;while(!u)u=rng();while(!v)v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
+function expScore(Ra,Rb){return 1/(1+Math.pow(10,(Rb-Ra)/400))}
+function kFor(games,rating){if(games<30)return 40;if(rating>=2000)return 10;return 20}
+
+// Population: N players, rating ~ Normal(1500, 300), clipped to a plausible range.
+const N=500;
+const players=[];
+for(let i=0;i<N;i++){players.push({id:i,rating:clamp(Math.round(1500+300*randn()),400,2800),games:Math.floor(rng()*60),history:[1500+Math.round(300*randn())]})}
+
+// Match log: pick a player, find an opponent within a matchmaking-like window, simulate outcome via the Elo formula.
+const matchLog=[];
+for(let g=0;g<12000;g++){
+  const a=players[Math.floor(rng()*N)];
+  let candidates=players.filter(p=>p.id!==a.id && Math.abs(p.rating-a.rating)<150);
+  if(!candidates.length) candidates=players;
+  const b=candidates[Math.floor(rng()*candidates.length)];
+  const Ea=expScore(a.rating,b.rating);
+  const Sa=rng()<Ea?1:0;
+  const Ka=kFor(a.games,a.rating), Kb=kFor(b.games,b.rating);
+  const Ra2=Math.round(a.rating+Ka*(Sa-Ea));
+  const Rb2=Math.round(b.rating+Kb*((1-Sa)-(1-Ea)));
+  matchLog.push({aId:a.id,bId:b.id,Ra:a.rating,Rb:b.rating,Ea,Sa,Ra2,Rb2});
+  a.rating=Ra2;a.games++;a.history.push(Ra2);
+  b.rating=Rb2;b.games++;b.history.push(Rb2);
+}
+
+const layoutBase={paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:getComputedStyle(document.body).color||'#333'},margin:{t:30,l:50,r:20,b:40}};
+
+// View 1
+function drawV1(){
+  const r=+document.getElementById('v1r').value;
+  const ratings=players.map(p=>p.rating);
+  const below=ratings.filter(x=>x<r).length;
+  document.getElementById('v1out').textContent=`You: ${r} — about ${(100*below/N).toFixed(0)}th percentile`;
+  Plotly.react('v1',[{x:ratings,type:'histogram',marker:{color:'#8884'}}],
+    Object.assign({},layoutBase,{shapes:[{type:'line',x0:r,x1:r,y0:0,y1:1,yref:'paper',line:{color:'#e11d48',width:2}}],xaxis:{title:'Rating'},yaxis:{title:'Players'}}),{displayModeBar:false});
+}
+document.getElementById('v1r').oninput=drawV1;
+
+// View 2
+function drawV2(){
+  const Ra=+document.getElementById('v2a').value, Rb=+document.getElementById('v2b').value;
+  const xs=[],ys=[];
+  for(let d=-800;d<=800;d+=20){xs.push(d);ys.push(1/(1+Math.pow(10,-d/400)))}
+  const E=expScore(Ra,Rb);
+  document.getElementById('v2out').textContent=`E_A = ${E.toFixed(3)} (expect to win ~${(E*100).toFixed(0)}% of these games)`;
+  Plotly.react('v2',[{x:xs,y:ys,mode:'lines',line:{color:'#4f46e5'}},{x:[Ra-Rb],y:[E],mode:'markers',marker:{color:'#e11d48',size:10}}],
+    Object.assign({},layoutBase,{showlegend:false,xaxis:{title:'Rating difference (you − opponent)'},yaxis:{title:'Expected score',range:[0,1]}}),{displayModeBar:false});
+}
+document.getElementById('v2a').oninput=drawV2;document.getElementById('v2b').oninput=drawV2;
+
+// View 3
+let v3i=0;
+function drawV3(){
+  const K=+document.getElementById('v3k').value;
+  document.getElementById('v3kout').textContent=K;
+  const m=matchLog[v3i];
+  const Ra2=Math.round(m.Ra+K*(m.Sa-m.Ea)), Rb2=Math.round(m.Rb+K*((1-m.Sa)-(1-m.Ea)));
+  document.getElementById('v3out').textContent=`Game #${v3i+1}: Player A ${m.Sa?'won':'lost'} (E_A=${m.Ea.toFixed(2)})`;
+  Plotly.react('v3',[{x:['A before','A after','B before','B after'],y:[m.Ra,Ra2,m.Rb,Rb2],type:'bar',marker:{color:['#9ca3af','#4f46e5','#9ca3af','#f59e0b']}}],
+    Object.assign({},layoutBase,{yaxis:{title:'Rating'}}),{displayModeBar:false});
+}
+document.getElementById('v3next').onclick=()=>{v3i=(v3i+1)%matchLog.length;drawV3()};
+document.getElementById('v3reset').onclick=()=>{v3i=0;drawV3()};
+document.getElementById('v3k').oninput=drawV3;
+
+// View 4
+let v4t=0,v4timer=null;
+function drawV4(){
+  const r=+document.getElementById('v4r').value;
+  const band=50+Math.floor(v4t/10)*25;
+  const count=players.filter(p=>Math.abs(p.rating-r)<=band).length;
+  document.getElementById('v4out').textContent=`t=${v4t}s, search window ±${band}, ${count} candidates`;
+  Plotly.react('v4',[{x:players.map(p=>p.rating),type:'histogram',marker:{color:'#8884'}}],
+    Object.assign({},layoutBase,{shapes:[{type:'rect',x0:r-band,x1:r+band,y0:0,y1:1,yref:'paper',fillcolor:'#4f46e533',line:{width:0}},{type:'line',x0:r,x1:r,y0:0,y1:1,yref:'paper',line:{color:'#e11d48',width:2}}],xaxis:{title:'Rating'},yaxis:{title:'Players'}}),{displayModeBar:false});
+}
+document.getElementById('v4r').oninput=drawV4;
+document.getElementById('v4reset').onclick=()=>{v4t=0;clearInterval(v4timer);v4timer=null;document.getElementById('v4play').textContent='Play ▶';drawV4()};
+document.getElementById('v4play').onclick=(e)=>{
+  if(v4timer){clearInterval(v4timer);v4timer=null;e.target.textContent='Play ▶';return}
+  e.target.textContent='Pause ❚❚';
+  v4timer=setInterval(()=>{v4t=Math.min(60,v4t+5);drawV4();if(v4t>=60){clearInterval(v4timer);v4timer=null;e.target.textContent='Play ▶'}},300);
+};
+
+// View 5
+const activePlayers=players.filter(p=>p.history.length>15).sort((a,b)=>b.history.length-a.history.length).slice(0,20);
+const sel5=document.getElementById('v5sel');
+activePlayers.forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=`Player ${p.id} — ${p.history.length-1} games (start ${p.history[0]})`;sel5.appendChild(o)});
+if(activePlayers.length) sel5.value=activePlayers[0].id;
+function drawV5(){
+  const id=+sel5.value; const p=players.find(x=>x.id===id)||activePlayers[0];
+  Plotly.react('v5',[{y:p.history,mode:'lines+markers',line:{color:'#4f46e5'}}],
+    Object.assign({},layoutBase,{xaxis:{title:'Game number'},yaxis:{title:'Rating'}}),{displayModeBar:false});
+}
+sel5.onchange=drawV5;
+
+// View 6
+function drawV6(){
+  const mode=document.getElementById('v6sel').value;
+  let logs=matchLog;
+  if(mode==='lo')logs=matchLog.filter(m=>m.Ra<1500);
+  if(mode==='hi')logs=matchLog.filter(m=>m.Ra>=1500);
+  const bins=Array.from({length:10},()=>({sum:0,n:0,win:0}));
+  logs.forEach(m=>{const b=Math.min(9,Math.floor(m.Ea*10));bins[b].sum+=m.Ea;bins[b].n++;bins[b].win+=m.Sa});
+  const px=[],py=[],sz=[];
+  bins.forEach(b=>{if(b.n>5){px.push(b.sum/b.n);py.push(b.win/b.n);sz.push(Math.min(30,4+b.n/15))}});
+  Plotly.react('v6',[{x:[0,1],y:[0,1],mode:'lines',line:{dash:'dot',color:'#9ca3af'},name:'perfect calibration'},
+    {x:px,y:py,mode:'markers',marker:{size:sz,color:'#4f46e5'},name:'observed'}],
+    Object.assign({},layoutBase,{xaxis:{title:'Predicted win probability',range:[0,1]},yaxis:{title:'Observed win rate',range:[0,1]},showlegend:false}),{displayModeBar:false});
+}
+document.getElementById('v6sel').onchange=drawV6;
+
+drawV1();drawV2();drawV3();drawV4();drawV5();drawV6();
+</script>
+</body>
+</html>
